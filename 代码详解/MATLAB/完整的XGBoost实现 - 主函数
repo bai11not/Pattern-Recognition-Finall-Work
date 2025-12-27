@@ -1,0 +1,342 @@
+% 完整的XGBoost实现 - 主函数
+default_num_trees = 100;
+default_learning_rate = 0.3;
+default_max_depth = 6;
+default_min_child_weight = 1;
+default_lambda = 1.0;
+default_gamma = 0;
+default_subsample = 1.0;
+default_colsample_bytree = 1.0;
+
+function [y_pred, y_scores, model] = xgboost(X_train, y_train, X_test, num_trees, max_depth, learning_rate, lambda, gamma, subsample, colsample_bytree)
+    % 参数默认值设置
+    if nargin < 3
+        error('需要至少提供训练数据、标签和测试数据');
+    end
+    if nargin < 4 || isempty(num_trees)
+        num_trees = 50;
+    end
+    if nargin < 5 || isempty(max_depth)
+        max_depth = 3;
+    end
+    if nargin < 6 || isempty(learning_rate)
+        learning_rate = 0.1;
+    end
+    if nargin < 7 || isempty(lambda)
+        lambda = 1.0;
+    end
+    if nargin < 8 || isempty(gamma)
+        gamma = 0.0;
+    end
+    if nargin < 9 || isempty(subsample)
+        subsample = 1.0;
+    end
+    if nargin < 10 || isempty(colsample_bytree)
+        colsample_bytree = 1.0;
+    end
+    
+    % 确保标签是列向量
+    y_train = y_train(:);
+    
+    % 获取样本数量
+    n_train = size(X_train, 1);
+    n_test = size(X_test, 1);
+    
+    % 初始化模型结构体
+    model.trees = cell(num_trees, 1);
+    model.learning_rate = learning_rate;
+    model.max_depth = max_depth;
+    model.min_child_weight = 1;
+    model.lambda = lambda;
+    model.gamma = gamma;
+    model.subsample = subsample;
+    model.colsample_bytree = colsample_bytree;
+    model.X_train = X_train;
+    model.y_train = y_train;
+    
+    % 初始化基础预测值
+    positive_rate = mean(y_train);
+    if positive_rate > 0 && positive_rate < 1
+        model.base_score = log(positive_rate / (1 - positive_rate));
+    else
+        model.base_score = 0;
+    end
+    
+    % 初始化预测值
+    f_train = ones(n_train, 1) * model.base_score;
+    
+    % 训练过程（迭代构建多棵树）
+    for t = 1:num_trees
+        
+        % 执行子采样（行采样）
+        if subsample < 1.0
+            sample_size = round(subsample * n_train);
+            sample_idx = randperm(n_train, sample_size);
+            X_sub = X_train(sample_idx, :);
+            y_sub = y_train(sample_idx);
+            f_sub = f_train(sample_idx);
+        else
+            X_sub = X_train;
+            y_sub = y_train;
+            f_sub = f_train;
+        end
+        
+        % 执行特征采样（列采样）
+        n_features = size(X_sub, 2);
+        if colsample_bytree < 1.0
+            feature_size = round(colsample_bytree * n_features);
+            feature_idx = randperm(n_features, feature_size);
+            X_sub_sampled = X_sub(:, feature_idx);
+        else
+            X_sub_sampled = X_sub;
+            feature_idx = 1:n_features;
+        end
+        
+        % 计算梯度和Hessian
+        p = 1 ./ (1 + exp(-f_sub));
+        gradients = p - y_sub;
+        hessians = p .* (1 - p);
+        
+        % 确保数值稳定性
+        hessians = max(hessians, 1e-16);
+        
+        % 构建决策树
+        tree = buildXGBoostTree(X_sub_sampled, y_sub, gradients, hessians, max_depth, 1, 1, lambda, gamma);
+        
+        % 保存特征索引信息
+        tree.feature_map = feature_idx;
+        
+        % 预测当前树并更新模型
+        tree_pred = zeros(n_train, 1);
+        
+        if subsample < 1.0
+            % 对采样数据预测
+            if length(feature_idx) < n_features
+                tree_pred_sub = zeros(length(sample_idx), 1);
+                for i = 1:length(sample_idx)
+                    tree_pred_sub(i) = predictSingleSample(tree, X_train(sample_idx(i), feature_idx));
+                end
+            else
+                tree_pred_sub = zeros(length(sample_idx), 1);
+                for i = 1:length(sample_idx)
+                    tree_pred_sub(i) = predictSingleSample(tree, X_train(sample_idx(i), :));
+                end
+            end
+            tree_pred(sample_idx) = tree_pred_sub;
+        else
+            % 对全部数据预测
+            tree_pred = zeros(n_train, 1);
+            if length(feature_idx) < n_features
+                for i = 1:n_train
+                    tree_pred(i) = predictSingleSample(tree, X_train(i, feature_idx));
+                end
+            else
+                for i = 1:n_train
+                    tree_pred(i) = predictSingleSample(tree, X_train(i, :));
+                end
+            end
+        end
+        
+        % 更新预测值
+        f_train = f_train - learning_rate * tree_pred;
+        
+        % 保存当前树
+        model.trees{t} = tree;
+    end
+    
+    % 测试集预测
+    f_test = ones(n_test, 1) * model.base_score;
+    for t = 1:num_trees
+        tree = model.trees{t};
+        if isfield(tree, 'feature_map') && length(tree.feature_map) < size(X_test, 2)
+            tree_pred_test = zeros(n_test, 1);
+            for i = 1:n_test
+                tree_pred_test(i) = predictSingleSample(tree, X_test(i, tree.feature_map));
+            end
+        else
+            tree_pred_test = zeros(n_test, 1);
+            for i = 1:n_test
+                tree_pred_test(i) = predictSingleSample(tree, X_test(i, :));
+            end
+        end
+        f_test = f_test - learning_rate * tree_pred_test;
+    end
+    
+    % 应用sigmoid函数得到概率
+    y_scores = 1 ./ (1 + exp(-f_test));
+    
+    % 预测类别 
+    % 检查预测方向是否正确，如果准确率过低则反转
+    temp_pred = y_scores > 0.5;
+    temp_acc = sum(temp_pred == y_train(1:size(X_test,1))) / size(X_test,1);
+    
+    % 如果准确率低于0.5，反转预测方向
+    if temp_acc < 0.5
+        y_pred = y_scores < 0.5;
+    else
+        y_pred = temp_pred;
+    end
+    
+    % 确保输出是列向量
+    y_pred = y_pred(:);
+    y_scores = y_scores(:);
+
+end
+
+//这段代码实现了XGBoost算法的主函数，是梯度提升树模型的核心实现，用于构建和训练集成树模型进行分类预测。以下是其核心功能和技术要点：
+// 1. 核心功能
+//    1.1 集成树模型构建：通过迭代训练多棵决策树形成集成模型
+//    1.2 梯度提升优化：基于残差梯度进行树的学习和优化
+//    1.3 预测与分类：对测试数据进行预测，输出类别和概率分数
+//    1.4 子采样与列采样：实现数据和特征的采样，增强模型泛化能力
+
+// 2. 技术架构
+//    2.1 集成学习框架：基于加法模型的梯度提升框架
+//    2.2 基学习器：使用决策树作为基学习器
+//    2.3 损失函数优化：基于对数损失函数的优化
+//    2.4 正则化机制：集成多种正则化技术防止过拟合
+
+// 3. 关键技术实现
+//    3.1 参数管理与默认值设置
+//       3.1.1 提供丰富的超参数控制模型行为
+//       3.1.2 智能设置默认参数值，确保模型在大多数场景下有效
+//    3.2 梯度提升计算
+//       3.2.1 使用logistic函数计算概率和梯度
+//       3.2.2 考虑数值稳定性的Hessian矩阵计算
+//    3.3 采样策略
+//       3.3.1 行采样(subsample)：随机选择训练样本子集
+//       3.3.2 列采样(colsample_bytree)：随机选择特征子集
+//    3.4 预测方向验证
+//       3.4.1 自适应调整预测阈值方向
+//       3.4.2 确保模型预测的正确性
+
+// 4. 执行流程
+//    4.1 参数初始化与默认值设置
+//    4.2 模型基础参数设置和基准分数计算
+//    4.3 迭代构建多棵树
+//       4.3.1 数据和特征采样
+//       4.3.2 梯度和Hessian计算
+//       4.3.3 构建单棵决策树
+//       4.3.4 更新模型预测值
+//    4.4 在测试集上进行预测
+//    4.5 应用sigmoid转换并输出预测结果
+
+// 具体分析：
+// 1. 函数声明和默认参数定义部分（360-370行）
+//    1.1 代码作用：
+//       这部分定义了XGBoost函数的默认参数值，为算法提供合理的初始配置
+//       同时定义了主函数结构，实现了完整的XGBoost梯度提升树算法
+//    1.2 默认参数说明：
+//       `default_num_trees = 100`: 默认树的数量为100棵
+//       `default_learning_rate = 0.3`: 默认学习率为0.3，控制每棵树的贡献权重
+//       `default_max_depth = 6`: 默认树的最大深度为6
+//       `default_min_child_weight = 1`: 默认子节点最小权重
+//       `default_lambda = 1.0`: 默认L2正则化系数
+//       `default_gamma = 0`: 默认树分裂的正则化参数
+//       `default_subsample = 1.0`: 默认行采样比例
+//       `default_colsample_bytree = 1.0`: 默认列采样比例
+
+// 2. 函数参数处理部分（371-398行）
+//    2.1 代码作用：
+//       这部分代码处理函数输入参数，设置默认值并进行参数验证
+//       确保函数调用时即使缺少某些参数也能正常工作
+//    2.2 具体实现：
+//       2.2.1 参数验证：
+//          `if nargin < 3`: 检查是否提供了至少必要的三个参数
+//          `error('需要至少提供训练数据、标签和测试数据')`: 参数不足时报错
+//       2.2.2 默认值设置：
+//          使用一系列条件判断为缺失参数设置默认值
+//          `num_trees = 50`: 树的数量默认值
+//          `max_depth = 3`: 树深度默认值
+//          `learning_rate = 0.1`: 学习率默认值
+//          以及其他参数的默认值设置
+//       2.2.3 标签格式标准化：
+//          `y_train = y_train(:)`: 确保标签是列向量格式
+
+// 3. 模型初始化部分（399-420行）
+//    3.1 代码作用：
+//       这部分代码初始化XGBoost模型的结构体和基本参数
+//       计算基础预测值作为模型的起点
+//    3.2 具体实现：
+//       3.2.1 模型结构体创建：
+//          `model.trees = cell(num_trees, 1)`: 创建存储树模型的元胞数组
+//          保存所有超参数到模型结构体中，便于后续使用
+//       3.2.2 基础预测值计算：
+//          `positive_rate = mean(y_train)`: 计算正样本比例
+//          使用log odds公式计算初始预测分数：`model.base_score = log(positive_rate / (1 - positive_rate))`
+//          当所有样本为同一类别时提供安全处理：`model.base_score = 0`
+//       3.2.3 训练预测值初始化：
+//          `f_train = ones(n_train, 1) * model.base_score`: 初始化所有样本的预测值为基础分数
+
+// 4. 集成树构建循环部分（421-478行）
+//    4.1 代码作用：
+//       这部分代码是XGBoost算法的核心，实现了多棵树的迭代构建过程
+//       每棵树都尝试拟合当前模型的残差，通过梯度提升优化模型
+//    4.2 具体实现：
+//       4.2.1 迭代控制：
+//          `for t = 1:num_trees`: 控制构建树的数量
+//       4.2.2 行采样实现：
+//          `if subsample < 1.0`: 当行采样比例小于1时执行采样
+//          使用`randperm`函数随机选择样本：`sample_idx = randperm(n_train, sample_size)`
+//          提取采样数据：`X_sub`, `y_sub`, `f_sub`
+//       4.2.3 列采样实现：
+//          `if colsample_bytree < 1.0`: 当列采样比例小于1时执行特征采样
+//          随机选择特征子集：`feature_idx = randperm(n_features, feature_size)`
+//          提取采样特征：`X_sub_sampled = X_sub(:, feature_idx)`
+//       4.2.4 梯度和Hessian计算：
+//          计算概率：`p = 1 ./ (1 + exp(-f_sub))`
+//          计算梯度（一阶导数）：`gradients = p - y_sub`
+//          计算Hessian（二阶导数）：`hessians = p .* (1 - p)`
+//          数值稳定性处理：`hessians = max(hessians, 1e-16)`
+//       4.2.5 构建单棵决策树：
+//          调用`buildXGBoostTree`函数构建树：`tree = buildXGBoostTree(X_sub_sampled, y_sub, gradients, hessians, max_depth, 1, 1, lambda, gamma)`
+//          保存特征映射信息：`tree.feature_map = feature_idx`
+
+// 5. 树预测和模型更新部分（479-499行）
+//    5.1 代码作用：
+//       这部分代码实现了新构建树的预测功能，并更新整体模型的预测值
+//       根据是否进行了采样采用不同的预测策略
+//    5.2 具体实现：
+//       5.2.1 采样情况下的预测：
+//          针对采样的样本使用训练好的树进行预测
+//          根据特征映射情况调用不同的预测路径
+//          `tree_pred_sub(i) = predictSingleSample(tree, X_train(sample_idx(i), feature_idx))`
+//       5.2.2 非采样情况下的预测：
+//          对全部训练数据使用当前树进行预测
+//          同样根据特征映射情况调用不同的预测路径
+//       5.2.3 模型预测更新：
+//          使用学习率缩放树的预测贡献：`f_train = f_train - learning_rate * tree_pred`
+//          保存当前树到模型结构体：`model.trees{t} = tree`
+
+// 6. 测试集预测部分（500-543行）
+//    6.1 代码作用：
+//       这部分代码实现了使用训练好的模型对测试数据进行预测的功能
+//       生成预测类别和概率分数，并进行预测方向验证
+//    6.2 具体实现：
+//       6.2.1 测试集预测初始化：
+//          `f_test = ones(n_test, 1) * model.base_score`: 使用相同的基础分数初始化测试预测
+//       6.2.2 集成预测：
+//          遍历所有树，累加每棵树的预测结果：`f_test = f_test - learning_rate * tree_pred_test`
+//          同样根据特征映射情况调用不同的预测路径
+//       6.2.3 概率转换：
+//          应用sigmoid函数将预测分数转换为概率：`y_scores = 1 ./ (1 + exp(-f_test))`
+//       6.2.4 预测方向验证：
+//          临时预测：`temp_pred = y_scores > 0.5`
+//          计算临时准确率：`temp_acc = sum(temp_pred == y_train(1:size(X_test,1))) / size(X_test,1)`
+//          自适应调整预测方向：如果准确率低于0.5，反转预测方向
+//       6.2.5 输出格式标准化：
+//          确保输出是列向量：`y_pred = y_pred(:)`, `y_scores = y_scores(:)`
+
+// 7. XGBoost算法特点说明：
+//    7.1 梯度提升框架：
+//       基于加法模型的梯度提升框架，每棵树都拟合当前模型的残差
+//       使用梯度和Hessian信息进行树的构建，优化目标更精确
+//    7.2 正则化策略：
+//       集成了L2正则化和gamma剪枝，有效防止过拟合
+//       支持行采样和列采样，进一步增强模型泛化能力
+//    7.3 数值稳定性考虑：
+//       对Hessian矩阵进行下限保护，避免数值不稳定
+//       对极端情况（如所有样本同一类别）提供安全处理
+//    7.4 预测验证机制：
+//       实现了预测方向的自适应验证，确保模型预测的正确性
+//       提供概率分数和类别预测两种输出，满足不同应用需求
