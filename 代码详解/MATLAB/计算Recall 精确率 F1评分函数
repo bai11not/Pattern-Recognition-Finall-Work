@@ -1,0 +1,192 @@
+% 计算召回率(Recall)的函数
+function recall = calculateRecall(actualLabels, predictedLabels)
+    % 计算召回率 (TPR = TP / (TP + FN))
+    % actualLabels: 实际标签 (0/1)
+    % predictedLabels: 预测标签 (0/1)
+    
+    % 确保输入是列向量
+    actualLabels = actualLabels(:);
+    predictedLabels = predictedLabels(:);
+    
+    % 检查数据维度是否匹配
+    if length(actualLabels) ~= length(predictedLabels)
+        error('实际标签和预测标签维度不匹配');
+    end
+    
+    % 计算真阳性(TP)和假阴性(FN)
+    TP = sum((actualLabels == 1) & (predictedLabels == 1));  % 实际为正且预测为正
+    FN = sum((actualLabels == 1) & (predictedLabels == 0));  % 实际为正但预测为负
+    
+    % 计算召回率
+    if (TP + FN) > 0
+        recall = TP / (TP + FN);
+    else
+        % 特殊情况：没有正例，返回1.0表示所有正例都被正确预测
+        recall = 1.0;
+    end
+    
+    % 确保召回率在0-1范围内
+    recall = max(0, min(1, recall));
+end
+
+% 计算精确率(Precision)的函数
+function precision = calculatePrecision(actualLabels, predictedLabels)
+    % 计算精确率 (PPV = TP / (TP + FP))
+    % actualLabels: 实际标签 (0/1)
+    % predictedLabels: 预测标签 (0/1)
+    
+    % 确保输入是列向量
+    actualLabels = actualLabels(:);
+    predictedLabels = predictedLabels(:);
+    
+    % 检查数据维度是否匹配
+    if length(actualLabels) ~= length(predictedLabels)
+        error('实际标签和预测标签维度不匹配');
+    end
+    
+    % 计算真阳性(TP)和假阳性(FP)
+    TP = sum((actualLabels == 1) & (predictedLabels == 1));  % 实际为正且预测为正
+    FP = sum((actualLabels == 0) & (predictedLabels == 1));  % 实际为负但预测为正
+    
+    % 计算精确率
+    if (TP + FP) > 0
+        precision = TP / (TP + FP);
+    else
+        % 特殊情况：没有预测为正例，返回1.0表示所有正预测都正确
+        precision = 1.0;
+    end
+    
+    % 确保精确率在0-1范围内
+    precision = max(0, min(1, precision));
+end
+
+% 计算F1评分的函数
+function f1 = calculateF1Score(actualLabels, predictedLabels)
+    % 计算F1评分 (F1 = 2 * (Precision * Recall) / (Precision + Recall))
+    % actualLabels: 实际标签 (0/1)
+    % predictedLabels: 预测标签 (0/1)
+    
+    % 计算精确率和召回率
+    precision = calculatePrecision(actualLabels, predictedLabels);
+    recall = calculateRecall(actualLabels, predictedLabels);
+    
+    % 计算F1评分
+    if (precision + recall) > 0
+        f1 = 2 * (precision * recall) / (precision + recall);
+    else
+        % 特殊情况：精确率和召回率都为0，返回0
+        f1 = 0;
+    end
+    
+    % 确保F1评分在0-1范围内
+    f1 = max(0, min(1, f1));
+end
+
+//这段代码实现了分类器性能评估的核心指标计算函数，包括召回率(Recall)、精确率(Precision)和F1评分，用于二分类任务的模型评估。以下是其核心功能和技术要点：
+// 1. 核心功能
+//    1.1 召回率计算：评估模型识别正例的能力
+//    1.2 精确率计算：评估模型预测准确性的能力
+//    1.3 F1评分计算：综合考虑精确率和召回率的平衡指标
+//    1.4 输入验证：确保输入数据格式正确和维度匹配
+
+// 2. 技术架构
+//    2.1 评估指标框架：实现了经典的二分类评估指标体系
+//    2.2 混淆矩阵计算：基于真阳性、假阳性、假阴性等混淆矩阵元素
+//    2.3 函数依赖关系：F1评分函数依赖于精确率和召回率函数
+//    2.4 边界情况处理：专门处理特殊情况，确保数值稳定性
+
+// 3. 关键技术实现
+//    3.1 数据格式标准化
+//       3.1.1 确保输入是列向量格式
+//       3.1.2 验证输入数据维度匹配
+//    3.2 混淆矩阵元素计算
+//       3.2.1 真阳性(TP)计算：实际为正且预测为正
+//       3.2.2 假阳性(FP)计算：实际为负但预测为正
+//       3.2.3 假阴性(FN)计算：实际为正但预测为负
+//    3.3 评分公式实现
+//       3.3.1 召回率公式：TP/(TP+FN)
+//       3.3.2 精确率公式：TP/(TP+FP)
+//       3.3.3 F1评分公式：2*(Precision*Recall)/(Precision+Recall)
+//    3.4 边界情况处理
+//       3.4.1 除数为零的特殊处理
+//       3.4.2 确保指标值在0-1范围内
+
+// 4. 执行流程
+//    4.1 召回率计算流程
+//       4.1.1 输入数据格式验证和标准化
+//       4.1.2 计算真阳性(TP)和假阴性(FN)计数
+//       4.1.3 应用召回率公式，处理特殊情况
+//       4.1.4 限制结果范围在0-1之间
+//    4.2 精确率计算流程
+//       4.2.1 输入数据格式验证和标准化
+//       4.2.2 计算真阳性(TP)和假阳性(FP)计数
+//       4.2.3 应用精确率公式，处理特殊情况
+//       4.2.4 限制结果范围在0-1之间
+//    4.3 F1评分计算流程
+//       4.3.1 调用精确率和召回率计算函数
+//       4.3.2 应用F1评分公式，处理特殊情况
+//       4.3.3 限制结果范围在0-1之间
+
+// 具体分析：
+// 1. 召回率(Recall)计算函数部分（994-1021行）
+//    1.1 代码作用：
+//       这部分定义了一个名为`calculateRecall`的函数，用于计算二分类问题中的召回率(Recall)指标
+//       召回率衡量了模型正确识别出的正例占所有实际正例的比例
+//    1.2 参数说明：
+//       `actualLabels`: 实际标签向量，值为0或1（二分类问题）
+//       `predictedLabels`: 模型预测的标签向量，值为0或1
+//    1.3 输出说明：
+//       返回计算得到的召回率值，范围在0到1之间
+//    1.4 具体实现：
+//       1.4.1 输入数据验证：
+//          `actualLabels = actualLabels(:)`: 确保实际标签是列向量格式
+//          `predictedLabels = predictedLabels(:)`: 确保预测标签是列向量格式
+//          验证两个向量维度是否匹配，不匹配则抛出错误
+//       1.4.2 混淆矩阵元素计算：
+//          `TP = sum((actualLabels == 1) & (predictedLabels == 1))`: 计算真阳性数量
+//          `FN = sum((actualLabels == 1) & (predictedLabels == 0))`: 计算假阴性数量
+//       1.4.3 召回率计算：
+//          当TP + FN > 0时，应用公式：`recall = TP / (TP + FN)`
+//          当TP + FN = 0（没有正例）时，返回1.0，表示所有正例都被正确预测
+//       1.4.4 结果约束：
+//          使用`max(0, min(1, recall))`确保召回率在0到1的有效范围内
+
+// 2. 精确率(Precision)计算函数部分（1022-1049行）
+//    2.1 代码作用：
+//       这部分定义了一个名为`calculatePrecision`的函数，用于计算二分类问题中的精确率(Precision)指标
+//       精确率衡量了模型预测为正例的样本中实际为正例的比例
+//    2.2 参数说明：
+//       `actualLabels`: 实际标签向量，值为0或1（二分类问题）
+//       `predictedLabels`: 模型预测的标签向量，值为0或1
+//    2.3 输出说明：
+//       返回计算得到的精确率值，范围在0到1之间
+//    2.4 具体实现：
+//       2.4.1 输入数据验证：
+//          与召回率函数相同，确保输入数据格式正确且维度匹配
+//       2.4.2 混淆矩阵元素计算：
+//          `TP = sum((actualLabels == 1) & (predictedLabels == 1))`: 计算真阳性数量
+//          `FP = sum((actualLabels == 0) & (predictedLabels == 1))`: 计算假阳性数量
+//       2.4.3 精确率计算：
+//          当TP + FP > 0时，应用公式：`precision = TP / (TP + FP)`
+//          当TP + FP = 0（没有预测为正例）时，返回1.0，表示所有正预测都正确
+//       2.4.4 结果约束：
+//          使用`max(0, min(1, precision))`确保精确率在0到1的有效范围内
+
+// 3. F1评分计算函数部分（1050-1076行）
+//    3.1 代码作用：
+//       这部分定义了一个名为`calculateF1Score`的函数，用于计算二分类问题中的F1评分
+//       F1评分是精确率和召回率的调和平均值，综合考虑了模型的准确性和全面性
+//    3.2 参数说明：
+//       `actualLabels`: 实际标签向量，值为0或1（二分类问题）
+//       `predictedLabels`: 模型预测的标签向量，值为0或1
+//    3.3 输出说明：
+//       返回计算得到的F1评分值，范围在0到1之间
+//    3.4 具体实现：
+//       3.4.1 依赖函数调用：
+//          调用`calculatePrecision`计算精确率
+//          调用`calculateRecall`计算召回率
+//       3.4.2 F1评分计算：
+//          当precision + recall > 0时，应用公式：`f1 = 2 * (precision * recall) / (precision + recall)`
+//          当precision + recall = 0（精确率和召回率都为0）时，返回0
+//       3.4.3 结果约束：
+//          使用`max(0, min(1, f1))`确保F1评分在0到1的有效范围内
