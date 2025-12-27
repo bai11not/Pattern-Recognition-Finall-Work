@@ -1,0 +1,598 @@
+% 主函数
+function main()
+    % 声明全局变量，以便画图函数访问
+    global accBSSAF accXGBoost accSVM accLogReg;  % 准确率
+    global aucBSSAF aucXGBoost aucSVM aucLogReg;  % AUC
+    global recallBSSAF recallXGBoost recallSVM recallLogReg;  % 召回率
+    global sensitivityBSSAF sensitivityXGBoost sensitivitySVM sensitivityLogReg;  % 灵敏度
+    global f1BSSAF f1XGBoost f1SVM f1LogReg;  % F1评分
+
+    fprintf('============================================\n');
+    fprintf('        乳腺癌诊断算法性能比较系统          \n');
+    fprintf('============================================\n');
+
+    % 数据加载与预处理
+    fprintf('正在加载数据集...\n');
+
+    try
+        % 直接使用本地已有的wdbc.data文件
+        fprintf('使用本地已存在的wdbc.data文件...\n');
+        
+        % 使用textscan读取CSV格式数据
+        fid = fopen('wdbc.data', 'r');
+        if fid == -1
+            error('无法打开数据文件wdbc.data');
+        end
+        
+        % 直接读取数据，根据UCI乳腺癌数据集格式：
+        % 第一列：ID (字符串)
+        % 第二列：诊断结果(M/B) (字符串)
+        % 第3-32列：30个特征值 (浮点数)
+        formatSpec = '%s %s';
+        for i = 3:32
+            formatSpec = [formatSpec, ' %f'];
+        end
+        
+        data = textscan(fid, formatSpec, 'Delimiter', ',', 'ReturnOnError', false);
+        fclose(fid);
+        
+        % 数据验证
+        if isempty(data) || length(data) < 2
+            error('无法从数据文件中读取有效数据');
+        end
+        
+        % 提取标签（第二列是M/B诊断结果）
+        labels = data{2};
+        
+        % 提取特征（第3-32列共30个特征）
+        featureCells = {};
+        for i = 3:length(data)
+            if ~isempty(data{i})
+                featureCells{end+1} = data{i};  %#ok<AGROW>
+            end
+        end
+        
+        % 转换特征为矩阵
+        features = cell2mat(featureCells);
+        
+        % 验证数据维度
+        fprintf('数据加载成功！\n');
+        fprintf('样本数量: %d\n', length(labels));
+        fprintf('特征维度: %d\n', length(featureCells));
+        
+        % 统计标签分布
+        if ~isempty(labels)
+            benignCount = sum(strcmp(labels, 'B'));
+            malignantCount = sum(strcmp(labels, 'M'));
+            fprintf('良性样本数(B): %d\n', benignCount);
+        fprintf('恶性样本数(M): %d\n', malignantCount);
+            labels = categorical(labels);
+        else
+            error('标签数据为空');
+        end
+        
+        % 数据标准化
+        if length(featureCells) > 0 && length(labels) > 0
+            % 确保特征矩阵维度正确
+            if size(features, 1) ~= length(labels)
+                features = features';
+            end
+            
+            % 执行z-score标准化
+            for i = 1:size(features, 2)
+                colMean = mean(features(:, i));
+                colStd = std(features(:, i));
+                if colStd > 0
+                    features(:, i) = (features(:, i) - colMean) / colStd;
+                end
+            end
+            fprintf('数据标准化完成\n');
+        else
+            error('特征数据或标签数据无效');
+        end
+        
+        % 数据集划分
+        fprintf('\n正在划分数据集...\n');
+        rng(2025);  % 设置随机数种子确保结果可复现
+        
+        % 计算样本总数和训练集大小
+        totalSamples = length(labels);
+        trainSize = round(totalSamples * 0.7);
+        
+        % 随机生成索引
+        indices = randperm(totalSamples);
+        trainIndices = indices(1:trainSize);
+        testIndices = indices(trainSize+1:end);
+        
+        % 划分数据集
+        trainFeatures = features(trainIndices, :);
+        trainLabels = labels(trainIndices);
+        testFeatures = features(testIndices, :);
+        testLabels = labels(testIndices);
+        
+        fprintf('训练集大小: %d\n', length(trainLabels));
+    fprintf('测试集大小: %d\n', length(testLabels));
+        
+        % 检查trainLabels和testLabels的结构
+        fprintf('标签数据结构调试:\n');
+    fprintf('trainLabels 类型: %s, 大小: %d x %d\n', class(trainLabels), size(trainLabels,1), size(trainLabels,2));
+    fprintf('testLabels 类型: %s, 大小: %d x %d\n', class(testLabels), size(testLabels,1), size(testLabels,2));
+        
+        % 创建结果变量，预设维度以避免维度问题
+        trainLabelsNum = zeros(size(trainLabels,1), 1);
+        testLabelsNum = zeros(size(testLabels,1), 1);
+        
+        % 处理训练标签
+        if iscategorical(trainLabels)
+            % 对于categorical类型，先转换为字符串
+            trainLabelsStr = cellstr(trainLabels);
+            for i = 1:length(trainLabelsStr)
+                trainLabelsNum(i) = strcmp(trainLabelsStr{i}, 'M');
+            end
+        elseif iscell(trainLabels)
+            % 处理单元格数组情况
+            for i = 1:length(trainLabels)
+                if ischar(trainLabels{i}) || isstring(trainLabels{i})
+                    trainLabelsNum(i) = strcmp(trainLabels{i}, 'M');
+                end
+            end
+        else
+            % 处理其他类型
+            fprintf('警告: 训练标签类型不明确，尝试直接比较\n');
+            trainLabelsChar = char(trainLabels);
+            for i = 1:size(trainLabelsChar,1)
+                trainLabelsNum(i) = strcmp(trainLabelsChar(i,:), 'M');
+            end
+        end
+        
+        % 处理测试标签
+        if iscategorical(testLabels)
+            % 对于categorical类型，先转换为字符串
+            testLabelsStr = cellstr(testLabels);
+            for i = 1:length(testLabelsStr)
+                testLabelsNum(i) = strcmp(testLabelsStr{i}, 'M');
+            end
+        elseif iscell(testLabels)
+            % 处理单元格数组情况
+            for i = 1:length(testLabels)
+                if ischar(testLabels{i}) || isstring(testLabels{i})
+                    testLabelsNum(i) = strcmp(testLabels{i}, 'M');
+                end
+            end
+        else
+            % 处理其他类型
+            fprintf('警告: 测试标签类型不明确，尝试直接比较\n');
+            testLabelsChar = char(testLabels);
+            for i = 1:size(testLabelsChar,1)
+                testLabelsNum(i) = strcmp(testLabelsChar(i,:), 'M');
+            end
+        end
+        
+        % 添加一些调试信息，验证数据维度
+        fprintf('训练特征维度: %d x %d\n', size(trainFeatures,1), size(trainFeatures,2));
+    fprintf('测试特征维度: %d x %d\n', size(testFeatures,1), size(testFeatures,2));
+    fprintf('训练标签数量: %d\n', length(trainLabelsNum));
+    fprintf('测试标签数量: %d\n', length(testLabelsNum));
+        
+        % 算法1：BSSAF神经网络
+        fprintf('\n正在训练BSSAF神经网络...\n');
+        try
+            % 设置BSSAF神经网络参数
+            hiddenSize = 48;  % 增加隐藏层神经元以提高模型表达能力
+            epochs = 300;     % 增加训练轮数以获得更好的收敛
+            learning_rate = 0.002;  % 降低学习率以获得更稳定的训练
+            
+            % 训练BSSAF神经网络
+            [bssafPred, bssafScores] = bssafClassifier(trainFeatures, trainLabelsNum, testFeatures, hiddenSize, epochs, learning_rate);
+            
+            % 计算准确率
+            correct = sum(bssafPred == testLabelsNum);
+            total = length(testLabelsNum);
+            accBSSAF = correct / total;
+            
+            % 计算AUC
+            aucBSSAF = calculateAUC(testLabelsNum, bssafScores);
+            
+            % 计算召回率
+            recallBSSAF = calculateRecall(testLabelsNum, bssafPred);
+            
+            % 计算灵敏度
+            sensitivityBSSAF = recallBSSAF;  % 在二分类中，灵敏度=召回率=TP/(TP+FN)
+            
+            % 计算精确率和F1评分
+            precisionBSSAF = calculatePrecision(testLabelsNum, bssafPred);
+            f1BSSAF = calculateF1Score(testLabelsNum, bssafPred);
+            
+            fprintf('BSSAF训练完成！准确率: %.4f (%d/%d), AUC: %.4f, 召回率: %.4f, 灵敏度: %.4f, F1评分: %.4f\n', accBSSAF, correct, total, aucBSSAF, recallBSSAF, sensitivityBSSAF, f1BSSAF);
+        catch ME
+            fprintf('错误：BSSAF训练失败！\n');
+            fprintf('错误信息: %s\n', ME.message);
+            accBSSAF = NaN;
+            aucBSSAF = NaN;
+            recallBSSAF = NaN;
+            sensitivityBSSAF = NaN;
+            precisionBSSAF = NaN;
+            f1BSSAF = NaN;
+        end
+        
+        % 算法2：XGBoost
+        fprintf('\n正在训练XGBoost...\n');
+        try
+            % 设置XGBoost参数
+            num_trees = 50;
+            max_depth = 3;
+            learning_rate = 0.1;
+            
+            % 训练XGBoost模型
+            [xgbPred, xgbScores] = xgboost(trainFeatures, trainLabelsNum, testFeatures, num_trees, max_depth, learning_rate);
+            
+            % 计算准确率
+            correct = sum(xgbPred == testLabelsNum);
+            total = length(testLabelsNum);
+            accXGBoost = correct / total;
+            
+            % 计算AUC
+            aucXGBoost = calculateAUC(testLabelsNum, xgbScores);
+            
+            % 计算召回率
+            recallXGBoost = calculateRecall(testLabelsNum, xgbPred);
+            
+            % 计算灵敏度
+            sensitivityXGBoost = recallXGBoost;  % 在二分类中，灵敏度=召回率=TP/(TP+FN)
+            
+            % 计算精确率和F1评分
+            precisionXGBoost = calculatePrecision(testLabelsNum, xgbPred);
+            f1XGBoost = calculateF1Score(testLabelsNum, xgbPred);
+            
+            fprintf('XGBoost训练完成！准确率: %.4f (%d/%d), AUC: %.4f, 召回率: %.4f, 灵敏度: %.4f, F1评分: %.4f\n', accXGBoost, correct, total, aucXGBoost, recallXGBoost, sensitivityXGBoost, f1XGBoost);
+        catch ME
+            fprintf('错误：XGBoost训练失败！\n');
+            fprintf('错误信息: %s\n', ME.message);
+            accXGBoost = NaN;
+            aucXGBoost = NaN;
+            recallXGBoost = NaN;
+            sensitivityXGBoost = NaN;
+            precisionXGBoost = NaN;
+            f1XGBoost = NaN;
+        end
+        
+        % 算法3：SVM
+        fprintf('\n正在训练SVM...\n');
+        try
+            % 设置SVM参数
+            C = 1.0;  % 正则化参数
+            kernel = 'linear';  % 核函数类型
+            tol = 1e-3;  % 容差
+            max_iter = 1000;  % 最大迭代次数
+            
+            % 训练SVM模型
+            [svmPred, svmScores] = svm(trainFeatures, trainLabelsNum, testFeatures, C, kernel, tol, max_iter);
+            
+            % 计算准确率
+            correct = sum(svmPred == testLabelsNum);
+            total = length(testLabelsNum);
+            accSVM = correct / total;
+            
+            % 计算AUC
+            aucSVM = calculateAUC(testLabelsNum, svmScores);
+            
+            % 计算召回率
+            recallSVM = calculateRecall(testLabelsNum, svmPred);
+            
+            % 计算灵敏度
+            sensitivitySVM = recallSVM;  % 在二分类中，灵敏度=召回率=TP/(TP+FN)
+            
+            % 计算精确率和F1评分
+            precisionSVM = calculatePrecision(testLabelsNum, svmPred);
+            f1SVM = calculateF1Score(testLabelsNum, svmPred);
+            
+            fprintf('SVM训练完成！准确率: %.4f (%d/%d), AUC: %.4f, 召回率: %.4f, 灵敏度: %.4f, F1评分: %.4f\n', accSVM, correct, total, aucSVM, recallSVM, sensitivitySVM, f1SVM);
+        catch ME
+            fprintf('错误：SVM训练失败！\n');
+            fprintf('错误信息: %s\n', ME.message);
+            accSVM = NaN;
+            aucSVM = NaN;
+            recallSVM = NaN;
+            sensitivitySVM = NaN;
+            precisionSVM = NaN;
+            f1SVM = NaN;
+        end
+        
+        % 算法4：逻辑回归
+        fprintf('\n正在训练逻辑回归...\n');
+        try
+            % 设置逻辑回归参数
+            lambda = 0;  % 正则化参数（默认不使用）
+            learning_rate = 0.01;  % 学习率
+            max_iter = 500;  % 最大迭代次数
+            
+            % 训练逻辑回归模型
+            [logRegPred, logRegScores] = logisticRegression(trainFeatures, trainLabelsNum, testFeatures, lambda, learning_rate, max_iter);
+            
+            % 计算准确率
+            correct = sum(logRegPred == testLabelsNum);
+            total = length(testLabelsNum);
+            accLogReg = correct / total;
+            
+            % 计算AUC
+            aucLogReg = calculateAUC(testLabelsNum, logRegScores);
+            
+            % 计算召回率
+            recallLogReg = calculateRecall(testLabelsNum, logRegPred);
+            
+            % 计算灵敏度
+            sensitivityLogReg = recallLogReg;  % 在二分类中，灵敏度=召回率=TP/(TP+FN)
+            
+            % 计算精确率和F1评分
+            precisionLogReg = calculatePrecision(testLabelsNum, logRegPred);
+            f1LogReg = calculateF1Score(testLabelsNum, logRegPred);
+            
+            fprintf('逻辑回归训练完成！准确率: %.4f (%d/%d), AUC: %.4f, 召回率: %.4f, 灵敏度: %.4f, F1评分: %.4f\n', accLogReg, correct, total, aucLogReg, recallLogReg, sensitivityLogReg, f1LogReg);
+        catch ME
+            fprintf('错误：逻辑回归训练失败！\n');
+            fprintf('错误信息: %s\n', ME.message);
+            accLogReg = NaN;
+            aucLogReg = NaN;
+            recallLogReg = NaN;
+            sensitivityLogReg = NaN;
+            precisionLogReg = NaN;
+            f1LogReg = NaN;
+        end
+        
+        % 性能比较
+        fprintf('\n============================================\n');
+    fprintf('               模型性能指标               \n');
+    fprintf('============================================\n');
+        
+        if ~isnan(accBSSAF)
+            fprintf('BSSAF神经网络准确率: %.4f, AUC: %.4f, 召回率: %.4f, 灵敏度: %.4f, F1评分: %.4f\n', accBSSAF, aucBSSAF, recallBSSAF, sensitivityBSSAF, f1BSSAF);
+        end
+        if ~isnan(accXGBoost)
+            fprintf('XGBoost准确率: %.4f, AUC: %.4f, 召回率: %.4f, 灵敏度: %.4f, F1评分: %.4f\n', accXGBoost, aucXGBoost, recallXGBoost, sensitivityXGBoost, f1XGBoost);
+        end
+        if ~isnan(accSVM)
+            fprintf('SVM准确率: %.4f, AUC: %.4f, 召回率: %.4f, 灵敏度: %.4f, F1评分: %.4f\n', accSVM, aucSVM, recallSVM, sensitivitySVM, f1SVM);
+        end
+        if ~isnan(accLogReg)
+            fprintf('逻辑回归准确率: %.4f, AUC: %.4f, 召回率: %.4f, 灵敏度: %.4f, F1评分: %.4f\n', accLogReg, aucLogReg, recallLogReg, sensitivityLogReg, f1LogReg);
+        end
+        
+        % 找出最佳算法（基于准确率）
+        validAccs = [accBSSAF, accXGBoost, accSVM, accLogReg];
+        validAccs = validAccs(~isnan(validAccs));
+        validRecalls = [recallBSSAF, recallXGBoost, recallSVM, recallLogReg];
+        validRecalls = validRecalls(~isnan(validRecalls));
+        validF1Scores = [f1BSSAF, f1XGBoost, f1SVM, f1LogReg];
+        validF1Scores = validF1Scores(~isnan(validF1Scores));
+        validIdxs = find(~isnan([accBSSAF, accXGBoost, accSVM, accLogReg]));
+        
+        if ~isempty(validAccs)
+            [maxAcc, bestIdx] = max(validAccs);
+            bestAlgorithms = {'BSSAF神经网络', 'XGBoost', 'SVM', '逻辑回归'};
+            fprintf('\n最佳算法(准确率): %s (准确率: %.4f)\n', bestAlgorithms{validIdxs(bestIdx)}, maxAcc);
+            
+            % 找出最佳算法（基于AUC）
+            validAUCs = [aucBSSAF, aucXGBoost, aucSVM, aucLogReg];
+            validAUCs = validAUCs(~isnan(validAUCs));
+            validAUCIdxs = find(~isnan([aucBSSAF, aucXGBoost, aucSVM, aucLogReg]));
+            
+            if ~isempty(validAUCs)
+                [maxAUC, bestAUCIdx] = max(validAUCs);
+                fprintf('最佳算法(AUC): %s (AUC: %.4f)\n', bestAlgorithms{validAUCIdxs(bestAUCIdx)}, maxAUC);
+            end
+            
+            % 找出最佳算法（基于召回率）
+            if ~isempty(validRecalls)
+                [maxRecall, bestRecallIdx] = max(validRecalls);
+                validRecallIdxs = find(~isnan([recallBSSAF, recallXGBoost, recallSVM, recallLogReg]));
+                fprintf('最佳算法(召回率): %s (召回率: %.4f)\n', bestAlgorithms{validRecallIdxs(bestRecallIdx)}, maxRecall);
+            end
+            
+            % 找出最佳算法（基于灵敏度）
+            if ~isempty(validRecalls)
+                [maxSensitivity, bestSensitivityIdx] = max(validRecalls);
+                validSensitivityIdxs = find(~isnan([sensitivityBSSAF, sensitivityXGBoost, sensitivitySVM, sensitivityLogReg]));
+                fprintf('最佳算法(灵敏度): %s (灵敏度: %.4f)\n', bestAlgorithms{validSensitivityIdxs(bestSensitivityIdx)}, maxSensitivity);
+            end
+            
+            % 找出最佳算法（基于F1评分）
+            if ~isempty(validF1Scores)
+                [maxF1, bestF1Idx] = max(validF1Scores);
+                validF1Idxs = find(~isnan([f1BSSAF, f1XGBoost, f1SVM, f1LogReg]));
+                fprintf('最佳算法(F1评分): %s (F1评分: %.4f)\n', bestAlgorithms{validF1Idxs(bestF1Idx)}, maxF1);
+            end
+        end
+        
+        fprintf('============================================\n');
+        
+        
+        fprintf('\n开始生成算法性能对比图表...\n');
+        
+        % 调用画图函数生成比较图表
+        plotAlgorithmComparison();
+        
+        fprintf('图形生成完成！\n');
+        fprintf('\n程序执行完成！\n');
+        
+    catch ME
+        fprintf('错误：程序执行失败！\n');
+    fprintf('错误信息: %s\n', ME.message);
+    end
+end
+
+//这段代码实现了乳腺癌诊断算法性能比较系统的主函数，集成了BSSAF神经网络、XGBoost、SVM和逻辑回归四种分类算法，并对它们的性能进行全面评估和可视化比较。以下是其核心功能和技术要点：
+// 1. 核心功能
+//    1.1 数据加载与预处理：读取UCI乳腺癌数据集，执行标准化和数据集划分
+//    1.2 多算法集成：同时训练和评估四种不同的分类算法
+//    1.3 性能指标计算：计算准确率、AUC、召回率、灵敏度和F1评分等多个指标
+//    1.4 算法比较：根据多个性能指标对不同算法进行综合比较
+//    1.5 结果可视化：生成算法性能对比图表
+
+// 2. 技术架构
+//    2.1 模块化设计：主函数作为控制中心，调用各个算法模块和评估函数
+//    2.2 错误处理机制：使用try-catch块确保程序健壮性
+//    2.3 全局变量共享：通过global关键字在函数间共享评估结果
+//    2.4 可配置参数：各算法参数可灵活调整
+
+// 3. 关键技术实现
+//    3.1 数据处理技术
+//       3.1.1 CSV数据读取：使用textscan精确读取乳腺癌数据集
+//       3.1.2 数据标准化：执行z-score标准化，确保特征量纲一致
+//       3.1.3 数据集划分：按7:3比例随机划分训练集和测试集
+//    3.2 算法集成技术
+//       3.2.1 统一接口：各算法函数返回预测类别和概率分数
+//       3.2.2 参数配置：为每种算法设置适当的超参数
+//    3.3 性能评估技术
+//       3.3.1 多指标计算：综合使用多种评估指标
+//       3.3.2 错误处理：为每种算法提供独立的错误捕获
+//    3.4 结果分析技术
+//       3.4.1 最佳算法选择：基于不同指标找出最佳算法
+//       3.4.2 NaN值处理：妥善处理可能的无效结果
+
+// 4. 执行流程
+//    4.1 初始化阶段
+//       4.1.1 定义全局变量，用于存储各算法性能指标
+//       4.1.2 显示系统标题信息
+//    4.2 数据处理阶段
+//       4.2.1 加载本地wdbc.data文件
+//       4.2.2 提取标签和特征数据
+//       4.2.3 执行数据标准化
+//       4.2.4 随机划分训练集和测试集
+//    4.3 算法训练与评估阶段
+//       4.3.1 依次训练BSSAF神经网络、XGBoost、SVM和逻辑回归
+//       4.3.2 对每种算法计算多个性能指标
+//       4.3.3 捕获并处理可能的训练错误
+//    4.4 结果比较与可视化阶段
+//       4.4.1 汇总并显示各算法性能指标
+//       4.4.2 根据不同指标找出最佳算法
+//       4.4.3 生成算法性能对比图表
+
+// 具体分析：
+// 1. 全局变量定义和系统信息显示部分（1078-1087行）
+//    1.1 代码作用：
+//       这部分代码定义了主函数的开始，声明了全局变量并显示系统标题信息
+//       全局变量用于在主函数和后续的画图函数之间共享算法性能指标
+//    1.2 全局变量说明：
+//       定义了四组性能指标，每组对应一种算法：
+//       - 准确率(accBSSAF, accXGBoost, accSVM, accLogReg)
+//       - AUC值(aucBSSAF, aucXGBoost, aucSVM, aucLogReg)
+//       - 召回率(recallBSSAF, recallXGBoost, recallSVM, recallLogReg)
+//       - 灵敏度(sensitivityBSSAF, sensitivityXGBoost, sensitivitySVM, sensitivityLogReg)
+//       - F1评分(f1BSSAF, f1XGBoost, f1SVM, f1LogReg)
+//    1.3 系统信息显示：
+//       使用fprintf函数输出系统标题"乳腺癌诊断算法性能比较系统"，增强用户体验
+
+// 2. 数据加载与预处理部分（1088-1179行）
+//    2.1 代码作用：
+//       这部分代码负责从本地文件加载乳腺癌数据集，并进行预处理，包括数据读取、格式验证、标准化和划分
+//       是算法训练前的数据准备阶段
+//    2.2 数据读取实现：
+//       2.2.1 使用fopen打开wdbc.data文件，检查文件是否成功打开
+//       2.2.2 根据UCI乳腺癌数据集格式定义读取格式：第一列是ID(字符串)，第二列是诊断结果(M/B)(字符串)，第3-32列是30个特征值(浮点数)
+//       2.2.3 使用textscan函数读取CSV格式数据
+//    2.3 数据验证与处理：
+//       2.3.1 验证数据是否成功读取
+//       2.3.2 提取标签（第二列）和特征（第3-32列）
+//       2.3.3 统计良性(B)和恶性(M)样本的数量分布
+//       2.3.4 将标签转换为categorical类型便于后续处理
+//    2.4 数据标准化：
+//       2.4.1 确保特征矩阵维度正确
+//       2.4.2 对每个特征列执行z-score标准化：(x - mean) / std
+//       2.4.3 处理标准差为0的特殊情况
+//    2.5 数据集划分：
+//       2.5.1 设置随机数种子(rng(2025))确保结果可复现
+//       2.5.2 按7:3比例划分训练集和测试集
+//       2.5.3 使用randperm生成随机索引，保证数据随机性
+
+// 3. 标签数据结构处理部分（1180-1221行）
+//    3.1 代码作用：
+//       这部分代码专门处理标签数据的格式转换，确保标签数据能被后续算法正确处理
+//       实现了对多种可能的标签数据类型的兼容性处理
+//    3.2 调试信息输出：
+//       输出标签数据的类型和大小信息，便于调试
+//    3.3 标签转换实现：
+//       3.3.1 创建预分配的数值型标签矩阵
+//       3.3.2 针对categorical类型标签，先转换为字符串再处理
+//       3.3.3 针对cell类型标签，逐个检查并转换
+//       3.3.4 针对其他类型，尝试直接比较
+//    3.4 特征维度验证：
+//       输出训练集和测试集的特征维度和标签数量，确保数据一致性
+
+// 4. BSSAF神经网络训练与评估部分（1222-1245行）
+//    4.1 代码作用：
+//       这部分代码负责训练BSSAF神经网络模型并评估其性能
+//       包含参数设置、模型训练、性能计算和错误处理
+//    4.2 参数设置：
+//       设置hiddenSize=48（隐藏层神经元数量）、epochs=300（训练轮数）、learning_rate=0.002（学习率）
+//    4.3 模型训练与评估：
+//       调用bssafClassifier函数训练模型并获取预测结果
+//       计算准确率、AUC、召回率、灵敏度和F1评分
+//    4.4 错误处理：
+//       使用try-catch块捕获可能的训练错误
+//       在错误情况下，设置所有性能指标为NaN
+
+// 5. XGBoost训练与评估部分（1246-1269行）
+//    5.1 代码作用：
+//       这部分代码负责训练XGBoost模型并评估其性能
+//       结构与BSSAF神经网络部分类似
+//    5.2 参数设置：
+//       设置num_trees=50（树的数量）、max_depth=3（树的最大深度）、learning_rate=0.1（学习率）
+//    5.3 模型训练与评估：
+//       调用xgboost函数训练模型并获取预测结果
+//       使用相同的性能指标进行评估
+//    5.4 错误处理：
+//       与BSSAF部分相同，使用try-catch块处理可能的错误
+
+// 6. SVM训练与评估部分（1270-1293行）
+//    6.1 代码作用：
+//       这部分代码负责训练SVM模型并评估其性能
+//    6.2 参数设置：
+//       设置C=1.0（正则化参数）、kernel='linear'（核函数类型）、tol=1e-3（容差）、max_iter=1000（最大迭代次数）
+//    6.3 模型训练与评估：
+//       调用svm函数训练模型并获取预测结果
+//       计算相同的性能指标集
+//    6.4 错误处理：
+//       采用统一的错误处理模式
+
+// 7. 逻辑回归训练与评估部分（1294-1317行）
+//    7.1 代码作用：
+//       这部分代码负责训练逻辑回归模型并评估其性能
+//    7.2 参数设置：
+//       设置lambda=0（正则化参数）、learning_rate=0.01（学习率）、max_iter=500（最大迭代次数）
+//    7.3 模型训练与评估：
+//       调用logisticRegression函数训练模型并获取预测结果
+//       计算统一的性能指标集
+//    7.4 错误处理：
+//       保持一致的错误处理机制
+
+// 8. 性能比较与最佳算法选择部分（1318-1381行）
+//    8.1 代码作用：
+//       这部分代码负责汇总所有算法的性能指标，进行比较，并根据不同指标找出最佳算法
+//    8.2 性能指标汇总：
+//       使用fprintf格式化输出所有算法的性能指标
+//       只输出成功训练的算法结果
+//    8.3 最佳算法选择：
+//       8.3.1 基于准确率找出最佳算法
+//       8.3.2 基于AUC找出最佳算法
+//       8.3.3 基于召回率找出最佳算法
+//       8.3.4 基于灵敏度找出最佳算法
+//       8.3.5 基于F1评分找出最佳算法
+//    8.4 NaN值处理：
+//       使用~isnan筛选出有效结果进行比较
+//       只有当存在有效结果时才进行最佳算法选择
+
+// 9. 结果可视化与程序完成部分（1382-1399行）
+//    9.1 代码作用：
+//       这部分代码负责生成算法性能对比图表，并标记程序执行完成
+//    9.2 图表生成：
+//       调用plotAlgorithmComparison函数生成可视化图表
+//       该函数使用之前定义的全局变量绘制各种性能指标的对比图
+//    9.3 程序完成提示：
+//       输出"图形生成完成！"和"程序执行完成！"的提示信息
+
+// 10. 主错误处理部分（1400-1403行）
+//     10.1 代码作用：
+//        这部分代码是主函数级别的错误处理，捕获整个执行过程中可能出现的未被内部try-catch块捕获的错误
+//     10.2 错误处理实现：
+//        使用try-catch块包裹整个主函数逻辑
+//        输出错误消息提示"程序执行失败！"
