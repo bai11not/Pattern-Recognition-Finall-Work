@@ -1,0 +1,139 @@
+% XGBoost算法实现
+function tree = buildXGBoostTree(X, y, gradients, hessians, max_depth, min_samples_split, current_depth, lambda, gamma)
+    % 创建一个内部函数来构建树节点
+    function node = createTreeNode()
+        node = struct('is_leaf', false, 'feature_idx', 0, 'threshold', 0, 'left_child', [], 'right_child', [], 'value', 0, 'gain', 0, 'cover', 0);
+    end
+    
+    % 创建树节点结构体
+    tree = createTreeNode();
+    tree.is_leaf = true;
+    % 参数默认值设置
+    if nargin < 9
+        gamma = 0.1;  % 树分裂的正则化参数
+    end
+    if nargin < 8
+        lambda = 1.0;  % L2正则化参数
+    end
+    if nargin < 7
+        current_depth = 1;
+    end
+    if nargin < 6
+        min_samples_split = 2;
+    end
+    if nargin < 5
+        max_depth = 6;
+    end
+    
+    % 创建叶节点的条件
+    if current_depth >= max_depth || size(X, 1) < min_samples_split
+        tree = createTreeNode();
+        tree.is_leaf = true;
+        
+        % 计算叶节点的值
+        sum_g = sum(gradients);
+        sum_h = sum(hessians);
+        
+        if sum_h + lambda > 0
+            tree.value = -sum_g / (sum_h + lambda);  % 带L2正则化的最优值
+        else
+            tree.value = 0;
+        end
+        
+        tree.cover = sum_h + lambda;
+        return;
+    end
+    
+    % 计算当前节点的总梯度和Hessian
+    sum_g_total = sum(gradients);
+    sum_h_total = sum(hessians);
+    
+    % 寻找最佳分裂点
+    best_gain = -inf;
+    best_feature = 0;
+    best_threshold = 0;
+    best_left_mask = [];
+    best_right_mask = [];
+    
+    % 遍历所有特征
+    for i = 1:size(X, 2)
+        % 对特征值进行排序以找到可能的分裂点
+        [sorted_vals, idx] = sort(X(:, i));
+        sorted_gradients = gradients(idx);
+        sorted_hessians = hessians(idx);
+        
+        % 计算累积梯度和Hessian
+        cum_grad_left = cumsum(sorted_gradients);
+        cum_hess_left = cumsum(sorted_hessians);
+        cum_grad_right = sum_g_total - cum_grad_left;
+        cum_hess_right = sum_h_total - cum_hess_left;
+        
+        % 遍历所有可能的分裂点
+        for j = 1:size(X, 1)-1
+            % 跳过重复值
+            if j < size(X, 1)-1 && sorted_vals(j) == sorted_vals(j+1)
+                continue;
+            end
+            
+            % 确保左右子树都有足够的样本
+            if j < min_samples_split || (size(X, 1) - j) < min_samples_split
+                continue;
+            end
+            
+            % 计算分裂增益
+            left_gain = cum_grad_left(j)^2 / (cum_hess_left(j) + lambda);
+            right_gain = cum_grad_right(j)^2 / (cum_hess_right(j) + lambda);
+            current_gain = cum_grad_left(j)^2 / (cum_hess_left(j) + lambda);
+            
+            % 计算最终增益
+            gain = 0.5 * (left_gain + right_gain - sum_g_total^2 / (sum_h_total + lambda)) - gamma;
+            
+            if gain > best_gain
+                best_gain = gain;
+                best_feature = i;
+                best_threshold = sorted_vals(j);
+                best_left_mask = idx(1:j);
+                best_right_mask = idx(j+1:end);
+            end
+        end
+    end
+    
+    % 如果增益不足以抵消gamma，停止分裂
+    if best_gain <= 0
+        tree = createTreeNode();
+        tree.is_leaf = true;
+        
+        if sum_h_total + lambda > 0
+            tree.value = -sum_g_total / (sum_h_total + lambda);
+        else
+            tree.value = 0;
+        end
+        
+        tree.cover = sum_h_total + lambda;
+        return;
+    end
+    
+    % 创建内部节点并递归构建子树
+    tree = createTreeNode();
+    tree.is_leaf = false;
+    tree.feature_idx = best_feature;
+    tree.threshold = best_threshold;
+    tree.gain = best_gain;
+    tree.cover = sum_h_total + lambda;
+    
+    % 确保左子树和右子树都有样本
+    if isempty(best_left_mask) || isempty(best_right_mask)
+        tree.is_leaf = true;
+        if sum_h_total + lambda > 0
+            tree.value = -sum_g_total / (sum_h_total + lambda);
+        else
+            tree.value = 0;
+        end
+        return;
+    end
+    
+    % 递归构建左右子树
+    tree.left_child = buildXGBoostTree(X(best_left_mask, :), y(best_left_mask), gradients(best_left_mask), hessians(best_left_mask), max_depth, min_samples_split, current_depth + 1, lambda, gamma);
+    tree.right_child = buildXGBoostTree(X(best_right_mask, :), y(best_right_mask), gradients(best_right_mask), hessians(best_right_mask), max_depth, min_samples_split, current_depth + 1, lambda, gamma);
+end
+
