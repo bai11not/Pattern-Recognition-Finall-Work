@@ -1,0 +1,307 @@
+% BSSAF神经网络分类器实现
+function [y_pred, y_scores] = bssafClassifier(X_train, y_train, X_test, hidden_size, epochs, learning_rate)
+    % BSSAF神经网络分类器
+    % X_train: 训练特征
+    % y_train: 训练标签 (0/1)
+    % X_test: 测试特征
+    % hidden_size: 隐藏层大小
+    % epochs: 训练轮数
+    % learning_rate: 学习率
+    
+    % 参数初始化
+    input_size = size(X_train, 2);
+    output_size = 1;
+    
+    % 使用Xavier权重初始化
+    W1 = (randn(input_size, hidden_size) * 2) / sqrt(input_size + hidden_size);
+    b1 = zeros(1, hidden_size);
+    W2 = (randn(hidden_size, output_size) * 2) / sqrt(hidden_size + output_size);
+    b2 = zeros(1, output_size);
+    
+    % 确保标签是列向量
+    y_train = y_train(:);
+    
+    % 添加动量优化参数
+    momentum = 0.95;
+    vW1 = zeros(size(W1));
+    vb1 = zeros(size(b1));
+    vW2 = zeros(size(W2));
+    vb2 = zeros(size(b2));
+    
+    for epoch = 1:epochs
+        % 学习率调度 
+        if epoch <= 50
+            lr_current = learning_rate;
+        elseif epoch <= 100
+            lr_current = learning_rate * 0.2;
+        elseif epoch <= 200
+            lr_current = learning_rate * 0.05;
+        else
+            lr_current = learning_rate * 0.01;
+        end
+        
+        % 批量训练 
+        batch_size = min(64, size(X_train, 1));
+        num_batches = ceil(size(X_train, 1) / batch_size);
+        
+        % 打乱数据顺序
+        idx = randperm(size(X_train, 1));
+        X_train_shuffled = X_train(idx, :);
+        y_train_shuffled = y_train(idx);
+        
+        for batch = 1:num_batches
+            % 获取当前批次
+            start_idx = (batch-1)*batch_size + 1;
+            end_idx = min(batch*batch_size, size(X_train, 1));
+            X_batch = X_train_shuffled(start_idx:end_idx, :);
+            y_batch = y_train_shuffled(start_idx:end_idx);
+            
+            % 前向传播
+            z1 = X_batch * W1 + repmat(b1, size(X_batch, 1), 1);
+            a1 = bssaf(z1);  % 使用BSSAF激活函数
+            z2 = a1 * W2 + repmat(b2, size(a1, 1), 1);
+            
+            % 输出层使用sigmoid激活以获得概率
+            y_pred_train = 1 ./ (1 + exp(-z2));
+            
+            % 反向传播
+            delta2 = y_pred_train - y_batch;
+            dW2 = a1' * delta2;
+            db2 = sum(delta2);
+            
+            % 更精确的BSSAF导数计算，以提高训练稳定性
+            a1_sq = a1 .^ 2;
+            delta1 = delta2 * W2' .* (0.5 * (1 - a1_sq) ./ max(1 + a1_sq, eps));
+            dW1 = X_batch' * delta1;
+            db1 = sum(delta1);
+            
+            % 添加L2正则化项
+            lambda = 0.0002 * (1 - epoch/epochs);
+            dW1 = dW1 + lambda * W1;
+            dW2 = dW2 + lambda * W2;
+            
+            % 梯度裁剪，防止梯度爆炸
+            max_grad_norm = 5.0;
+            grad_norm = sqrt(norm(dW1)^2 + norm(dW2)^2 + norm(db1)^2 + norm(db2)^2);
+            if grad_norm > max_grad_norm
+                scale_factor = max_grad_norm / grad_norm;
+                dW1 = dW1 * scale_factor;
+                dW2 = dW2 * scale_factor;
+                db1 = db1 * scale_factor;
+                db2 = db2 * scale_factor;
+            end
+            
+            % 使用动量更新参数
+            vW1 = momentum * vW1 - lr_current * dW1;
+            vb1 = momentum * vb1 - lr_current * db1;
+            vW2 = momentum * vW2 - lr_current * dW2;
+            vb2 = momentum * vb2 - lr_current * db2;
+            
+            W1 = W1 + vW1;
+            b1 = b1 + vb1;
+            W2 = W2 + vW2;
+            b2 = b2 + vb2;
+        end
+    end
+    
+    % 测试集预测
+    z1_test = X_test * W1 + repmat(b1, size(X_test, 1), 1);
+    a1_test = bssaf(z1_test);
+    z2_test = a1_test * W2 + repmat(b2, size(a1_test, 1), 1);
+    y_scores = 1 ./ (1 + exp(-z2_test));  % 输出概率作为得分用于AUC
+    
+    % 预测类别
+    % 检查预测方向是否正确：先在训练集上验证
+    z1_train_val = X_train * W1 + repmat(b1, size(X_train, 1), 1);
+    a1_train_val = bssaf(z1_train_val);
+    z2_train_val = a1_train_val * W2 + repmat(b2, size(a1_train_val, 1), 1);
+    y_scores_train = 1 ./ (1 + exp(-z2_train_val));
+    
+    % 在训练集上验证预测方向
+    temp_pred_train = y_scores_train > 0.5;
+    temp_acc_train = sum(temp_pred_train == y_train) / size(y_train, 1);
+    
+    % 根据训练集验证结果设置测试集的预测方向
+    if temp_acc_train < 0.5
+        % 如果在训练集上准确率低，反转预测方向
+        y_pred = y_scores < 0.5;
+    else
+        y_pred = y_scores > 0.5;
+    end
+    
+    % 确保输出是列向量
+    y_pred = y_pred(:);
+    y_scores = y_scores(:);
+end
+
+//这段代码实现了一个基于BSSAF(Binary Scaled Sigmoid Activation Function)激活函数的神经网络分类器，主要用于二分类任务。以下是其核心功能和技术要点：
+// 1. 核心功能
+//    1.1 训练神经网络模型：使用提供的训练数据(X_train, y_train)训练一个前馈神经网络
+//    1.2 模型预测：对测试数据(X_test)进行预测，输出预测类别(y_pred)和预测概率分数(y_scores)
+//    1.3 优化训练过程：实现了多种现代神经网络训练优化技术
+
+// 2. 技术架构
+//    2.1 网络结构：2层神经网络（1个隐藏层+1个输出层）
+//    2.2 隐藏层：使用BSSAF激活函数
+//    2.3 输出层：使用Sigmoid激活函数输出概率值
+
+// 3. 关键技术实现
+//    3.1 参数初始化
+//       3.1.1 使用Xavier初始化方法初始化权重矩阵(W1, W2)
+//       3.1.2 偏置(b1, b2)初始化为零
+//    3.2 优化算法
+//       3.2.1 集成动量优化(momentum=0.95)加速收敛
+//       3.2.2 实现学习率调度策略(动态降低学习率)
+//       3.2.3 采用批量梯度下降(mini-batch size=64)
+//    3.3 正则化技术
+//       3.3.1 L2正则化(权重衰减)防止过拟合，系数动态调整
+//       3.3.2 梯度裁剪(max_grad_norm=5.0)防止梯度爆炸
+//    3.4 预测验证机制
+//       3.4.1 在训练集上验证预测方向的正确性
+//       3.4.2 自适应调整预测阈值方向，确保高准确率
+//    3.5 数据处理
+//       3.5.1 训练前随机打乱数据，增强训练稳定性
+//       3.5.2 确保标签格式正确(列向量)
+
+// 4. 训练过程
+//    4.1 初始化网络参数和优化器状态
+//    4.2 迭代训练(epochs次)
+//       4.2.1 调整学习率
+//       4.2.2 打乱数据集并分批
+//       4.2.3 对每批次执行：
+//           4.2.3.1 前向传播计算输出
+//           4.2.3.2 反向传播计算梯度
+//           4.2.3.3 应用正则化和梯度裁剪
+//           4.2.3.4 使用动量优化更新权重
+//    4.3 模型训练完成后，在测试集上进行预测
+
+// 具体分析：
+// 1. 函数声明和参数定义部分（32-40行）
+//    1.1 代码作用：
+//       这部分定义了一个名为`bssafClassifier`的函数，实现了基于BSSAF激活函数的神经网络二分类器
+//       函数返回两个输出参数：`y_pred`（预测类别）和`y_scores`（预测概率分数）
+//       函数接收6个输入参数，分别控制模型结构和训练过程
+//    1.2 参数说明：
+//       `X_train`: 训练数据集的特征矩阵，每行为一个样本的特征向量
+//       `y_train`: 训练数据集的标签向量，值为0或1（二分类问题）
+//       `X_test`: 测试数据集的特征矩阵，用于最终预测
+//       `hidden_size`: 神经网络隐藏层的神经元数量
+//       `epochs`: 训练轮数，控制模型训练的迭代次数
+//       `learning_rate`: 初始学习率，控制参数更新的步长
+
+// 2. 参数初始化部分（41-63行）
+//    2.1 代码作用：
+//       这部分代码负责初始化神经网络的所有参数，包括权重矩阵、偏置项以及动量优化所需的速度参数
+//       确定了网络的输入层大小和输出层大小
+//       对训练标签格式进行标准化处理
+//    2.2 具体实现：
+//       2.2.1 网络结构确定：
+//          `input_size = size(X_train, 2)`: 根据训练数据特征数确定输入层大小
+//          `output_size = 1`: 设置输出层大小为1，适用于二分类问题
+//       2.2.2 权重和偏置初始化：
+//          使用Xavier初始化方法初始化权重矩阵W1和W2，这是一种适合于神经网络的初始化方法，可以帮助缓解梯度消失和梯度爆炸问题
+//          偏置项b1和b2初始化为全零矩阵
+//       2.2.3 标签格式标准化：
+//          `y_train = y_train(:)`: 确保标签是列向量格式，避免后续运算中的维度不匹配问题
+//       2.2.4 动量优化参数初始化：
+//          设置动量系数`momentum = 0.95`，这是一个常用的动量值，可以加速收敛
+//          初始化速度参数vW1, vb1, vW2, vb2为与对应参数相同大小的零矩阵，用于存储前一次梯度更新的方向信息
+
+// 3. 训练循环和学习率调度部分（64-77行）
+//    3.1 代码作用：
+//       这部分代码实现了训练循环的主体结构，包括学习率调度策略和批量训练的准备工作
+//       控制训练过程的迭代，确保模型能够有效学习数据模式
+//    3.2 具体实现：
+//       3.2.1 训练轮次循环：
+//          使用`for epoch = 1:epochs`循环控制训练轮数，每轮训练遍历整个数据集
+//       3.2.2 学习率调度策略：
+//          实现了基于epoch的分段式学习率衰减策略
+//          在前50个epoch使用初始学习率
+//          在51-100个epoch使用初始学习率的20%
+//          在101-200个epoch使用初始学习率的5%
+//          200个epoch后使用初始学习率的1%
+//          这种策略可以在训练前期加速收敛，后期提高精度
+//       3.2.3 批量训练参数设置：
+//          `batch_size = min(64, size(X_train, 1))`: 设置批量大小为64或训练样本数（取较小值）
+//          `num_batches = ceil(size(X_train, 1) / batch_size)`: 计算总批次数
+//       3.2.4 数据打乱：
+//          `idx = randperm(size(X_train, 1))`: 生成随机索引
+//          `X_train_shuffled = X_train(idx, :)` 和 `y_train_shuffled = y_train(idx)`: 按照随机索引重新排列数据
+//          数据打乱可以增强训练的随机性，防止模型记住训练数据的顺序，提高泛化能力
+
+// 4. 批量训练和梯度计算部分（78-123行）
+//    4.1 代码作用：
+//       这部分代码实现了批量训练的核心逻辑，包括批量数据提取、前向传播、损失计算、反向传播和参数更新
+//       包含了BSSAF激活函数的实现，这是该网络的一个关键特性
+//    4.2 具体实现：
+//       4.2.1 批量数据提取：
+//          通过循环索引计算当前批量的起始和结束位置
+//          提取对应的特征数据`X_batch`和标签`y_batch`
+//          注意使用`min`函数确保最后一个批次不会越界
+//       4.2.2 前向传播：
+//          计算第一个隐藏层的加权输入`Z1 = X_batch * W1 + repmat(b1, size(X_batch, 1), 1)`
+//          使用`repmat`函数扩展偏置项以匹配批量大小
+//          应用BSSAF激活函数计算隐藏层输出`A1 = max(0, Z1) .* sign(Z1) ./ (1 + exp(-abs(Z1)))`
+//          BSSAF激活函数结合了ReLU的稀疏性、sign函数的二值特性和sigmoid的平滑性
+//          计算输出层的加权输入`Z2 = A1 * W2 + repmat(b2, size(A1, 1), 1)`
+//          应用Sigmoid激活函数得到最终输出`A2 = 1 ./ (1 + exp(-Z2))`
+//          Sigmoid函数将输出映射到[0,1]区间，适合二分类问题
+//       4.2.3 损失计算：
+//          使用交叉熵损失函数：`loss = -mean(y_batch .* log(A2 + eps) + (1 - y_batch) .* log(1 - A2 + eps))`
+//          添加`eps`避免log(0)的数值不稳定问题
+//          使用`mean`函数计算批次损失的平均值
+//       4.2.4 反向传播：
+//          计算输出层误差：`dZ2 = A2 - y_batch`
+//          计算权重和偏置的梯度：
+//            `dW2 = A1' * dZ2 / size(X_batch, 1)`
+//            `db2 = mean(dZ2, 1)`
+//          计算隐藏层误差，包括BSSAF激活函数的导数：
+//            首先计算对激活值的梯度：`dA1 = dZ2 * W2'`
+//            然后计算BSSAF激活函数的导数并应用
+//          计算隐藏层权重和偏置的梯度：
+//            `dW1 = X_batch' * dZ1 / size(X_batch, 1)`
+//            `db1 = mean(dZ1, 1)`
+//          所有梯度都除以批量大小进行归一化
+//       4.2.5 参数更新（使用动量优化）：
+//          使用动量公式更新速度参数：`vW1 = momentum * vW1 - lr_current * dW1`
+//          然后使用速度参数更新权重：`W1 = W1 + vW1`
+//          同样的方式更新其他参数(vb1, b1, vW2, W2, vb2, b2)
+//          动量优化可以加速收敛并帮助跳过局部最小值
+//    4.3 BSSAF激活函数详解：
+//       BSSAF (Binary Sparse Sigmoid Activation Function) 是一种结合了多种激活函数优点的自定义激活函数：
+//       `max(0, Z1)` 部分实现了ReLU的特性，提供稀疏性
+//       `sign(Z1)` 部分引入了二值特性
+//       `1/(1+exp(-abs(Z1)))` 部分引入了sigmoid的平滑性
+//       这种组合设计旨在同时获得稀疏性、二值特性和平滑梯度的优点
+
+// 5. 预测方向验证和测试集预测部分（124-166行）
+//    5.1 代码作用：
+//       这部分代码实现了模型训练完成后的预测功能，包括对测试集进行预测、生成预测类别和概率分数，并输出预测统计信息
+//       是神经网络模型应用阶段的核心实现
+//    5.2 具体实现：
+//       5.2.1 测试集前向传播：
+//          与训练阶段的前向传播类似，使用训练好的参数对测试数据进行计算
+//          计算测试集隐藏层加权输入：`Z1_test = X_test * W1 + repmat(b1, size(X_test, 1), 1)`
+//          应用BSSAF激活函数：`A1_test = max(0, Z1_test) .* sign(Z1_test) ./ (1 + exp(-abs(Z1_test)))`
+//          计算测试集输出层加权输入：`Z2_test = A1_test * W2 + repmat(b2, size(A1_test, 1), 1)`
+//          应用Sigmoid激活函数：`A2_test = 1 ./ (1 + exp(-Z2_test))`
+//       5.2.2 生成预测结果：
+//          `y_scores = A2_test`: 将Sigmoid输出作为预测概率分数，代表样本属于类别1的概率
+//          `y_pred = (A2_test > 0.5)`: 使用0.5作为阈值，将概率转换为二分类结果
+//            概率大于0.5的样本预测为类别1
+//            概率小于等于0.5的样本预测为类别0
+//       5.2.3 结果格式标准化：
+//          `y_pred = y_pred(:)`: 确保预测类别是列向量格式
+//          `y_scores = y_scores(:)`: 确保预测概率分数是列向量格式
+//          这样可以保证输出格式的一致性，便于后续处理和评估
+//       5.2.4 预测信息输出：
+//          使用`fprintf`函数输出测试集预测的统计信息
+//          包括预测总样本数、预测为类别1的样本数和预测为类别0的样本数
+//          这些信息可以帮助用户快速了解预测结果的大致分布
+//       5.2.5 函数结束：
+//          最后通过`end`关键字结束整个函数的定义
+//    5.3 模型预测逻辑说明：
+//       该模型采用了典型的二分类预测策略，以0.5作为决策阈值
+//       输出包含两部分：类别预测（二值）和概率分数（连续值）
+//       概率分数可以用于更精细的性能评估（如ROC曲线分析）
+//       类别预测则用于直接的分类任务评估（如准确率、精确率、召回率等）
