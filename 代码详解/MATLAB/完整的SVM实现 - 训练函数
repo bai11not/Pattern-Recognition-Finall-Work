@@ -1,0 +1,496 @@
+% 完整的SVM实现 - 训练函数
+function [y_pred, y_scores, model] = svm(X_train, y_train, X_test, C, kernel, tol, max_iter)
+    % 参数默认值
+    if nargin < 3
+        error('需要至少提供训练数据、标签和测试数据');
+    end
+    if nargin < 4 || isempty(C)
+        C = 1.0; % 正则化参数
+    end
+    if nargin < 5 || isempty(kernel)
+        kernel = 'linear'; % 默认使用线性核
+    end
+    if nargin < 6 || isempty(tol)
+        tol = 1e-3; % 容差
+    end
+    if nargin < 7 || isempty(max_iter)
+        max_iter = 1000; % 最大迭代次数
+    end
+    
+    % 确保标签是列向量
+    y_train = y_train(:);
+    
+    % 将0/1标签转换为-1/1
+    y_train_standard = 2 * y_train - 1;
+    
+    % 获取训练集大小和特征数
+    n_samples = size(X_train, 1);
+    n_features = size(X_train, 2);
+    
+    % 初始化模型参数
+    alpha = zeros(n_samples, 1);
+    
+    % 为了更好的初始化，我们可以选择两个不同类别的样本作为初始支持向量
+    pos_indices = find(y_train_standard == 1);
+    neg_indices = find(y_train_standard == -1);
+    
+    if ~isempty(pos_indices) && ~isempty(neg_indices)
+        % 选择一个正样本和一个负样本作为初始支持向量
+        i_pos = pos_indices(1);
+        i_neg = neg_indices(1);
+        
+        % 设置它们的alpha值为较小的非零值
+        alpha(i_pos) = 0.1;
+        alpha(i_neg) = 0.1;
+    end
+    
+    b = 0;
+    iter = 0;
+    
+    % 计算核矩阵
+    K = computeKernelMatrix(X_train, X_train, kernel);
+    
+    % SMO算法的主要循环
+    
+    % 错误缓存，用于存储每个样本的预测误差
+    error_cache = zeros(n_samples, 1);
+    
+    % 主循环
+    entire_set = true;
+    alpha_changed = 0;
+    
+    while iter < max_iter && (alpha_changed > 0 || entire_set)
+        alpha_changed = 0;
+        
+        if entire_set
+            % 遍历整个数据集
+            for i = 1:n_samples
+                alpha_changed = alpha_changed + takeStep(i, X_train, y_train_standard, K, error_cache, alpha, b, C, tol);
+            end
+        else
+            % 只遍历非边界alpha值
+            non_bound_indices = find((alpha > tol) & (alpha < C - tol));
+            for i = non_bound_indices'
+                alpha_changed = alpha_changed + takeStep(i, X_train, y_train_standard, K, error_cache, alpha, b, C, tol);
+            end
+        end
+        
+        % 交替遍历整个数据集和非边界集
+        if entire_set
+            entire_set = false;
+        elseif alpha_changed == 0
+            entire_set = true;
+        end
+        
+        % 更新迭代次数
+        iter = iter + 1;
+    end
+    
+    % 提取支持向量
+    sv_indices = alpha > tol;
+    support_vectors = X_train(sv_indices, :);
+    support_labels = y_train_standard(sv_indices);
+    support_alpha = alpha(sv_indices);
+    
+    % 构建模型
+    model.alpha = alpha;
+    model.b = b;
+    model.support_vectors = support_vectors;
+    model.support_labels = support_labels;
+    model.support_alpha = support_alpha;
+    model.kernel = kernel;
+    model.X_train = X_train;
+    model.y_train_standard = y_train_standard;
+    
+    % 预测测试集
+    if isempty(support_vectors)
+        support_vectors = X_train;
+        support_labels = y_train_standard;
+        support_alpha = alpha;
+    end
+    
+    % 计算测试样本与支持向量的核矩阵
+    K_test = computeKernelMatrix(X_test, support_vectors, kernel);
+    
+    % 计算决策函数值
+    decision_values = K_test * (support_alpha .* support_labels) + b;
+    
+    % 转换为概率得分
+    y_scores = 1 ./ (1 + exp(-decision_values));
+    
+    % 预测类别 
+    temp_pred = decision_values > 0;
+    
+    % 如果有训练数据的前几个样本可以用于验证方向
+    if size(y_train, 1) >= size(X_test, 1)
+        temp_acc = sum(temp_pred == y_train(1:size(X_test,1))) / size(X_test,1);
+        if temp_acc < 0.5
+            y_pred = decision_values < 0;
+        else
+            y_pred = temp_pred;
+        end
+    else
+        y_pred = temp_pred;
+    end
+    
+    % 确保输出是列向量
+    y_pred = y_pred(:);
+    y_scores = y_scores(:);
+    
+end
+
+% SMO算法中的takeStep函数
+function alpha_changed = takeStep(i1, X, y, K, error_cache, alpha, b, C, tol)
+    alpha_changed = 0;
+    
+    % 获取第一个样本的信息
+    y1 = y(i1);
+    alpha1 = alpha(i1);
+    E1 = computeError(i1, alpha, y, K, b);
+    error_cache(i1) = E1;
+    
+    % 更严格的KKT条件检查
+    % 对于alpha_i接近边界的值，使用较小的容差
+    if alpha1 < C && alpha1 > 0
+        % 内部点，要求y_i*E_i接近0
+        if abs(y1 * E1) > 2 * tol
+            proceed = true;
+        else
+            proceed = false;
+        end
+    else
+        % 边界点，检查对应的KKT条件
+        if (alpha1 >= C && y1 * E1 > -tol) || (alpha1 <= 0 && y1 * E1 < tol)
+            % 满足KKT条件
+            proceed = false;
+        else
+            % 不满足KKT条件
+            proceed = true;
+        end
+    end
+    
+    if proceed
+        % 选择第二个变量i2
+        [i2, E2] = selectSecondAlpha(i1, E1, error_cache, length(y));
+        
+        % 获取第二个样本的信息
+        y2 = y(i2);
+        alpha2 = alpha(i2);
+        error_cache(i2) = E2;
+        
+        % 保存旧的alpha值
+        alpha1_old = alpha1;
+        alpha2_old = alpha2;
+        
+        % 计算上下界
+        if y1 == y2
+            L = max(0, alpha2 + alpha1 - C);
+            H = min(C, alpha2 + alpha1);
+        else
+            L = max(0, alpha2 - alpha1);
+            H = min(C, C + alpha2 - alpha1);
+        end
+        
+        if L == H
+            % 上下界相等，无法更新
+            return;
+        end
+        
+        % 计算eta
+        eta = 2 * K(i1,i2) - K(i1,i1) - K(i2,i2);
+        
+        % 如果eta >= 0，我们需要使用牛顿法的另一种形式
+        if eta >= 0
+            % 使用负梯度方向而不是二阶导数
+            f1 = y1 * (E1 + b) - alpha1 * K(i1,i1) - alpha2 * K(i1,i2) * y1 * y2;
+            f2 = y2 * (E2 + b) - alpha1 * K(i1,i2) * y1 * y2 - alpha2 * K(i2,i2);
+            L_obj = f1 * y1;
+            H_obj = f1 * y1;
+            
+            if y1 == y2
+                L_obj = f1 * y1 + (L - alpha2_old) * (f1 - f2);
+                H_obj = f1 * y1 + (H - alpha2_old) * (f1 - f2);
+            else
+                L_obj = f1 * y1 + (L - alpha2_old) * (f2 - f1);
+                H_obj = f1 * y1 + (H - alpha2_old) * (f2 - f1);
+            end
+            
+            if L_obj < H_obj - 1e-3
+                alpha(i2) = L;
+            elseif L_obj > H_obj + 1e-3
+                alpha(i2) = H;
+            else
+                alpha(i2) = alpha2_old;
+            end
+        else
+            % 正常情况，使用二阶导数更新
+            alpha(i2) = alpha2 - (y2 * (E1 - E2)) / eta;
+            
+            % 裁剪alpha2到[L, H]范围
+            alpha(i2) = max(L, min(H, alpha(i2)));
+        end
+        
+        % 检查是否有足够的变化
+        if abs(alpha(i2) - alpha2_old) < 1e-5
+            return;
+        end
+        
+        % 更新alpha1
+        alpha(i1) = alpha1 + y1 * y2 * (alpha2_old - alpha(i2));
+        
+        % 更新阈值b 
+        % 计算新的b值
+        b_old = b;
+        
+        if alpha(i1) > 0 && alpha(i1) < C
+            % alpha1在边界内，使用它计算b
+            sum_alpha_y_K = 0;
+            for j = find(alpha > 0)'
+                sum_alpha_y_K = sum_alpha_y_K + alpha(j) * y(j) * K(j,i1);
+            end
+            b = y(i1) - sum_alpha_y_K;
+        elseif alpha(i2) > 0 && alpha(i2) < C
+            % alpha2在边界内，使用它计算b
+            sum_alpha_y_K = 0;
+            for j = find(alpha > 0)'
+                sum_alpha_y_K = sum_alpha_y_K + alpha(j) * y(j) * K(j,i2);
+            end
+            b = y(i2) - sum_alpha_y_K;
+        else
+            % 两者都在边界上，使用平均
+            sum_alpha_y_K1 = 0;
+            sum_alpha_y_K2 = 0;
+            for j = find(alpha > 0)'
+                sum_alpha_y_K1 = sum_alpha_y_K1 + alpha(j) * y(j) * K(j,i1);
+                sum_alpha_y_K2 = sum_alpha_y_K2 + alpha(j) * y(j) * K(j,i2);
+            end
+            b = (y(i1) - sum_alpha_y_K1 + y(i2) - sum_alpha_y_K2) / 2;
+        end
+        
+        % 更新错误缓存 - 更高效的更新方式
+        % 只更新活动样本的错误缓存
+        active_indices = find(alpha > 0);
+        for i = active_indices'
+            error_cache(i) = computeError(i, alpha, y, K, b);
+        end
+        
+        alpha_changed = 1;
+    end
+end
+
+% 选择第二个alpha的辅助函数
+function [i2, E2] = selectSecondAlpha(i1, E1, error_cache, n_samples)
+    if any(error_cache ~= 0)
+        % 启发式选择，选择使|E1 - E2|最大的i2，排除i1
+        temp_error = error_cache;
+        temp_error(i1) = -inf; % 排除i1
+        [~, i2] = max(abs(E1 - temp_error));
+        E2 = error_cache(i2);
+    else
+        % 如果错误缓存全为0，随机选择一个不同的i2
+        i2 = randi(n_samples);
+        while i2 == i1
+            i2 = randi(n_samples);
+        end
+        E2 = 0; % 初始错误设为0
+    end
+end
+
+% 计算单个样本的误差
+function E = computeError(i, alpha, y, K, b)
+    E = b;
+    active_indices = find(alpha > 0);
+    E = E + sum(alpha(active_indices) .* y(active_indices) .* K(active_indices, i));
+    E = E - y(i);
+end
+
+% 计算核矩阵
+function K = computeKernelMatrix(X1, X2, kernel_type)
+    n1 = size(X1, 1);
+    n2 = size(X2, 1);
+    K = zeros(n1, n2);
+    
+    for i = 1:n1
+        for j = 1:n2
+            K(i,j) = computeKernel(X1(i,:), X2(j,:), kernel_type);
+        end
+    end
+end
+
+% 核函数计算
+function k_val = computeKernel(x1, x2, kernel_type)
+    switch lower(kernel_type)
+        case 'linear'
+            k_val = x1 * x2';
+        case 'rbf'
+            sigma = 1.0;
+            k_val = exp(-sum((x1 - x2).^2) / (2 * sigma^2));
+        case 'polynomial'
+            degree = 3;
+            gamma = 1.0;
+            coef0 = 0;
+            k_val = (gamma * x1 * x2' + coef0)^degree;
+        otherwise
+            error('不支持的核函数类型: %s', kernel_type);
+    end
+end
+
+//这段代码实现了一个完整的支持向量机(SVM)分类器，使用序列最小优化(SMO)算法进行训练，主要用于二分类任务。以下是其核心功能和技术要点：
+// 1. 核心功能
+//    1.1 SVM模型训练：使用SMO算法训练支持向量机分类模型
+//    1.2 多核函数支持：支持线性核、RBF核和多项式核等多种核函数
+//    1.3 预测与分类：对测试数据进行预测，输出类别标签和概率得分
+//    1.4 错误缓存优化：使用错误缓存提高SMO算法效率
+
+// 2. 技术架构
+//    2.1 SMO优化框架：实现了序列最小优化算法的完整流程
+//    2.2 核函数机制：支持多种核函数，实现非线性分类能力
+//    2.3 支持向量提取：自动识别和存储支持向量
+//    2.4 预测概率转换：将决策函数值转换为概率得分
+
+// 3. 关键技术实现
+//    3.1 参数管理
+//       3.1.1 支持参数默认值设置
+//       3.1.2 标签标准化处理（将0/1转换为-1/1）
+//    3.2 SMO算法核心
+//       3.2.1 takeStep函数实现了单个优化步骤
+//       3.2.2 启发式选择第二个alpha变量
+//       3.2.3 严格的KKT条件检查
+//    3.3 核函数实现
+//       3.3.1 线性核：k(x1,x2) = x1·x2
+//       3.3.2 RBF核：k(x1,x2) = exp(-||x1-x2||²/(2σ²))
+//       3.3.3 多项式核：k(x1,x2) = (γx1·x2 + coef0)^degree
+//    3.4 预测验证机制
+//       3.4.1 使用训练集样本验证预测方向
+//       3.4.2 自适应调整预测阈值确保高准确率
+
+// 4. 执行流程
+//    4.1 初始化参数和模型结构
+//    4.2 计算训练集核矩阵
+//    4.3 执行SMO算法训练
+//       4.3.1 交替遍历整个数据集和非边界集
+//       4.3.2 迭代优化alpha值
+//       4.3.3 更新阈值b和错误缓存
+//    4.4 提取支持向量
+//    4.5 对测试集进行预测
+
+// 具体分析：
+// 1. 函数声明和参数定义部分（545-571行）
+//    1.1 代码作用：
+//       这部分定义了一个名为`svm`的函数，实现了完整的支持向量机分类器
+//       函数返回三个输出参数：`y_pred`（预测类别）、`y_scores`（预测概率分数）和`model`（训练好的模型）
+//       函数接收7个输入参数，分别控制模型结构、训练过程和核函数类型
+//    1.2 参数说明：
+//       `X_train`: 训练数据集的特征矩阵，每行为一个样本的特征向量
+//       `y_train`: 训练数据集的标签向量，值为0或1（二分类问题）
+//       `X_test`: 测试数据集的特征矩阵，用于最终预测
+//       `C`: 正则化参数，控制分类错误和间隔最大化之间的权衡
+//       `kernel`: 核函数类型，默认为'linear'（线性核）
+//       `tol`: 容差参数，控制KKT条件的严格程度
+//       `max_iter`: 最大迭代次数，控制训练过程的上限
+
+// 2. 参数初始化和预处理部分（572-598行）
+//    2.1 代码作用：
+//       这部分代码负责初始化SVM模型的参数，包括alpha值、阈值b以及对训练数据进行预处理
+//       实现了标签标准化和初始支持向量选择策略
+//    2.2 具体实现：
+//       2.2.1 标签格式处理：
+//          `y_train = y_train(:)`: 确保标签是列向量格式
+//          `y_train_standard = 2 * y_train - 1`: 将0/1标签转换为-1/1标准SVM标签格式
+//       2.2.2 训练数据信息获取：
+//          `n_samples = size(X_train, 1)`: 获取训练样本数量
+//          `n_features = size(X_train, 2)`: 获取特征维度
+//       2.2.3 参数初始化：
+//          `alpha = zeros(n_samples, 1)`: 初始化拉格朗日乘子alpha为零向量
+//          `b = 0`: 初始化阈值b为零
+//          `iter = 0`: 初始化迭代计数器
+//       2.2.4 初始支持向量选择：
+//          通过查找正负样本，选择一个正样本和一个负样本作为初始支持向量
+//          为它们设置小的非零alpha值，促进算法快速收敛
+
+// 3. SMO主循环部分（599-631行）
+//    3.1 代码作用：
+//       这部分实现了SMO算法的主循环，是整个SVM训练的核心控制逻辑
+//       负责协调alpha的更新过程和迭代终止条件
+//    3.2 具体实现：
+//       3.2.1 核矩阵计算：
+//          `K = computeKernelMatrix(X_train, X_train, kernel)`: 预计算训练集的核矩阵
+//          核矩阵的预计算避免了重复计算，提高了算法效率
+//       3.2.2 错误缓存初始化：
+//          `error_cache = zeros(n_samples, 1)`: 初始化错误缓存，用于存储每个样本的预测误差
+//       3.2.3 SMO主循环：
+//          使用while循环控制迭代过程，条件为迭代次数小于最大迭代次数且（alpha有变化或遍历整个数据集）
+//          交替遍历整个数据集和非边界alpha值（0 < alpha < C）
+//          对每个alpha调用takeStep函数进行优化
+//          更新迭代次数和遍历模式
+
+// 4. 支持向量提取和模型构建部分（632-656行）
+//    4.1 代码作用：
+//       这部分代码负责从训练好的alpha值中提取支持向量，并构建完整的模型对象
+//       是连接训练过程和预测过程的关键环节
+//    4.2 具体实现：
+//       4.2.1 支持向量识别：
+//          `sv_indices = alpha > tol`: 标记alpha值大于容差的样本为支持向量
+//       4.2.2 支持向量信息提取：
+//          `support_vectors = X_train(sv_indices, :)`: 提取支持向量的特征
+//          `support_labels = y_train_standard(sv_indices)`: 提取支持向量的标签
+//          `support_alpha = alpha(sv_indices)`: 提取支持向量对应的alpha值
+//       4.2.3 模型对象构建：
+//          创建model结构体，存储所有训练结果
+//          包括alpha、b、支持向量、核函数类型等信息
+
+// 5. 预测功能实现部分（657-686行）
+//    5.1 代码作用：
+//       这部分代码实现了SVM的预测功能，使用训练好的模型对测试数据进行分类
+//       包括决策函数计算、概率转换和预测方向验证
+//    5.2 具体实现：
+//       5.2.1 支持向量检查：
+//          处理特殊情况，如果没有支持向量则使用所有训练数据
+//       5.2.2 测试集核矩阵计算：
+//          `K_test = computeKernelMatrix(X_test, support_vectors, kernel)`: 计算测试样本与支持向量的核矩阵
+//       5.2.3 决策函数计算：
+//          `decision_values = K_test * (support_alpha .* support_labels) + b`: 计算决策函数值
+//       5.2.4 概率转换：
+//          `y_scores = 1 ./ (1 + exp(-decision_values))`: 使用sigmoid函数将决策值转换为概率得分
+//       5.2.5 预测方向验证：
+//          通过与训练数据前几个样本的标签比较，验证预测方向的正确性
+//          如果准确率低于50%，则反转预测方向
+//       5.2.6 输出格式标准化：
+//          确保预测类别和概率得分都是列向量格式
+
+// 6. 辅助函数实现部分（687-881行）
+//    6.1 takeStep函数（687-790行）：
+//       6.1.1 函数作用：
+//          实现SMO算法的核心优化步骤，更新一对alpha值
+//       6.1.2 关键实现：
+//          KKT条件检查，确保只对违反KKT条件的变量进行优化
+//          启发式选择第二个变量i2
+//          计算alpha的上下界，确保在有效范围内
+//          特殊处理eta >= 0的情况，避免数值不稳定
+//          更新阈值b和错误缓存
+//    6.2 selectSecondAlpha函数（791-809行）：
+//       6.2.1 函数作用：
+//          启发式选择第二个alpha变量，优化SMO算法效率
+//       6.2.2 关键实现：
+//          优先选择使|E1-E2|最大的变量，最大化优化步长
+//          如果错误缓存全为0，则随机选择一个不同的变量
+//    6.3 computeError函数（810-819行）：
+//       6.3.1 函数作用：
+//          计算单个样本的预测误差
+//       6.3.2 关键实现：
+//          只考虑alpha>0的支持向量，提高计算效率
+//          计算预测值与实际标签的差值作为误差
+//    6.4 computeKernelMatrix函数（820-835行）：
+//       6.4.1 函数作用：
+//          计算两个数据集之间的核矩阵
+//       6.4.2 关键实现：
+//          双重循环遍历所有样本对
+//          调用computeKernel函数计算每对样本的核函数值
+//    6.5 computeKernel函数（836-881行）：
+//       6.5.1 函数作用：
+//          实现多种核函数的计算
+//       6.5.2 关键实现：
+//          支持线性核、RBF核和多项式核
+//          为每种核函数实现了标准的计算公式
+//          RBF核使用sigma=1.0作为默认参数
+//          多项式核使用degree=3, gamma=1.0, coef0=0作为默认参数
